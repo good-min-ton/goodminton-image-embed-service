@@ -1,0 +1,25 @@
+# Standalone compose for the image-embed microservice (local/dev use).
+# Host-bound to 127.0.0.1 only (H6) — no external network exposure; RAG
+# (running native on the same host) reaches it via http://localhost:8001.
+#
+#   docker compose up -d --build
+services:
+  embed-service:
+    build:
+      context: .
+    image: goodminton-image-embed-service:local
+    container_name: goodminton-image-embed-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8001:8001"
+    mem_limit: 3g # H12
+    cpus: 2 # H12: bound CPU so TORCH_NUM_THREADS matches the allocation
+    environment:
+      TORCH_NUM_THREADS: "2" # H12: matches the cpus limit above
+    healthcheck:
+      # slim base image has no curl; use python (guaranteed present)
+      test: [ "CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://localhost:8001/health').status==200 else 1)\"" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s # model load can take a few seconds on cold start
