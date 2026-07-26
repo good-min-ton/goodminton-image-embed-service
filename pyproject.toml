@@ -1,0 +1,32 @@
+[project]
+name = "goodminton-image-embed-service"
+version = "0.1.0"
+description = "SigLIP image-embedding microservice for Goodminton visual search"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pillow>=10.4",
+    "transformers>=4.44,<5",
+    "torch>=2.3,<2.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.25",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
