@@ -5,11 +5,14 @@ import os
 from contextlib import asynccontextmanager
 
 import torch
-from fastapi import FastAPI, File, UploadFile
-from PIL import Image
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from PIL import Image, UnidentifiedImageError
 from transformers import SiglipImageProcessor, SiglipModel
 
 MODEL_NAME = "google/siglip-base-patch16-224"
+
+Image.MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP decompression-bomb guard (H4)
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB raw-byte cap (H4)
 
 
 @asynccontextmanager
@@ -44,8 +47,28 @@ async def health():
 
 @app.post("/embed/image")
 async def embed_image(file: UploadFile = File(...)):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="file must be an image")
+
     data = await file.read()
-    img = Image.open(io.BytesIO(data)).convert("RGB")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="image exceeds max upload size")
+
+    try:
+        img = Image.open(io.BytesIO(data))
+        # Pillow only *warns* (does not raise) between 1x and 2x MAX_IMAGE_PIXELS,
+        # so enforce the pixel cap explicitly (H4) before decoding.
+        if img.width * img.height > Image.MAX_IMAGE_PIXELS:
+            raise HTTPException(
+                status_code=400, detail="image rejected by decompression-bomb guard"
+            )
+        img = img.convert("RGB")
+    except Image.DecompressionBombError:
+        raise HTTPException(
+            status_code=400, detail="image rejected by decompression-bomb guard"
+        )
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="invalid image data")
 
     inputs = app.state.processor(images=img, return_tensors="pt")
     with torch.no_grad():
