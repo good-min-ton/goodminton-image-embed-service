@@ -1,3 +1,6 @@
+from app import main as main_module
+
+
 def test_health_returns_status_and_model_loaded(client):
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -5,4 +8,5 @@ def test_health_returns_status_and_model_loaded(client):
         "status": "ok",
         "model_loaded": True,
         "rerank_loaded": True,
+        "device": main_module.DEVICE,
     }

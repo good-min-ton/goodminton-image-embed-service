@@ -19,6 +19,9 @@ MODEL_NAME = "google/siglip-base-patch16-224"
 RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 MAX_RERANK_DOCS = 64
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+_RERANK_DTYPE = torch.float16 if DEVICE == "cuda" else torch.float32
+
 Image.MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP decompression-bomb guard (H4)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB raw-byte cap (H4)
 
@@ -30,15 +33,20 @@ async def lifespan(app: FastAPI):
     threads = int(os.environ.get("TORCH_NUM_THREADS", os.cpu_count() or 1))
     torch.set_num_threads(threads)
 
-    app.state.model = SiglipModel.from_pretrained(MODEL_NAME, use_safetensors=True)
+    app.state.model = SiglipModel.from_pretrained(MODEL_NAME, use_safetensors=True).to(
+        DEVICE
+    )
     app.state.model.eval()
     app.state.processor = SiglipImageProcessor.from_pretrained(MODEL_NAME)
 
     app.state.rerank_tok = AutoTokenizer.from_pretrained(RERANK_MODEL)
-    app.state.rerank_model = AutoModelForSequenceClassification.from_pretrained(
-        RERANK_MODEL
+    app.state.rerank_model = (
+        AutoModelForSequenceClassification.from_pretrained(
+            RERANK_MODEL, torch_dtype=_RERANK_DTYPE
+        )
+        .to(DEVICE)
+        .eval()
     )
-    app.state.rerank_model.eval()
 
     yield
 
@@ -62,6 +70,7 @@ async def health():
         "status": "ok",
         "model_loaded": app.state.model is not None,
         "rerank_loaded": app.state.rerank_model is not None,
+        "device": DEVICE,
     }
 
 
@@ -90,11 +99,11 @@ async def embed_image(file: UploadFile = File(...)):  # noqa: B008
     except UnidentifiedImageError:
         raise HTTPException(status_code=400, detail="invalid image data")
 
-    inputs = app.state.processor(images=img, return_tensors="pt")
+    inputs = app.state.processor(images=img, return_tensors="pt").to(DEVICE)
     with torch.no_grad():
         features = app.state.model.get_image_features(**inputs)
     normalized = features / features.norm(p=2, dim=-1, keepdim=True)
-    return {"embedding": normalized.squeeze(0).tolist()}
+    return {"embedding": normalized.squeeze(0).float().cpu().tolist()}
 
 
 class RerankRequest(BaseModel):
@@ -111,7 +120,7 @@ async def rerank(req: RerankRequest):
     pairs = [[req.query, doc] for doc in req.documents]
     inputs = app.state.rerank_tok(
         pairs, padding=True, truncation=True, max_length=512, return_tensors="pt"
-    )
+    ).to(DEVICE)
     with torch.no_grad():
-        scores = app.state.rerank_model(**inputs).logits.view(-1).float().tolist()
+        scores = app.state.rerank_model(**inputs).logits.view(-1).float().cpu().tolist()
     return {"scores": scores}

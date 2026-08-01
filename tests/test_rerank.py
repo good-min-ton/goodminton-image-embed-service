@@ -28,3 +28,25 @@ def test_rerank_rejects_too_many_documents(client):
 
 def test_health_reports_rerank_loaded(client):
     assert client.get("/health").json()["rerank_loaded"] is True
+
+
+from app import main as main_module
+
+
+def test_health_reports_device(client):
+    d = client.get("/health").json()
+    assert d["device"] in ("cuda", "cpu")
+    assert d["device"] == main_module.DEVICE
+
+
+def test_rerank_still_scores_after_device_change(client):
+    resp = client.post(
+        "/rerank",
+        json={
+            "query": "giày cầu lông chống lật cổ chân",
+            "documents": ["Giày cầu lông ổn định cổ chân.", "Vợt cầu lông carbon."],
+        },
+    )
+    assert resp.status_code == 200
+    scores = resp.json()["scores"]
+    assert len(scores) == 2 and scores[0] > scores[1]
