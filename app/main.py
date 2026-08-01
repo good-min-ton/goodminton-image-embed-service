@@ -7,9 +7,17 @@ from contextlib import asynccontextmanager
 import torch
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
-from transformers import SiglipImageProcessor, SiglipModel
+from pydantic import BaseModel
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    SiglipImageProcessor,
+    SiglipModel,
+)
 
 MODEL_NAME = "google/siglip-base-patch16-224"
+RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
+MAX_RERANK_DOCS = 64
 
 Image.MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP decompression-bomb guard (H4)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB raw-byte cap (H4)
@@ -26,10 +34,18 @@ async def lifespan(app: FastAPI):
     app.state.model.eval()
     app.state.processor = SiglipImageProcessor.from_pretrained(MODEL_NAME)
 
+    app.state.rerank_tok = AutoTokenizer.from_pretrained(RERANK_MODEL)
+    app.state.rerank_model = AutoModelForSequenceClassification.from_pretrained(
+        RERANK_MODEL
+    )
+    app.state.rerank_model.eval()
+
     yield
 
     app.state.model = None
     app.state.processor = None
+    app.state.rerank_tok = None
+    app.state.rerank_model = None
 
 
 app = FastAPI(
@@ -42,11 +58,15 @@ app = FastAPI(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model_loaded": app.state.model is not None}
+    return {
+        "status": "ok",
+        "model_loaded": app.state.model is not None,
+        "rerank_loaded": app.state.rerank_model is not None,
+    }
 
 
 @app.post("/embed/image")
-async def embed_image(file: UploadFile = File(...)):
+async def embed_image(file: UploadFile = File(...)):  # noqa: B008
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="file must be an image")
 
@@ -75,3 +95,23 @@ async def embed_image(file: UploadFile = File(...)):
         features = app.state.model.get_image_features(**inputs)
     normalized = features / features.norm(p=2, dim=-1, keepdim=True)
     return {"embedding": normalized.squeeze(0).tolist()}
+
+
+class RerankRequest(BaseModel):
+    query: str
+    documents: list[str]
+
+
+@app.post("/rerank")
+async def rerank(req: RerankRequest):
+    if not req.query or not req.documents:
+        raise HTTPException(status_code=400, detail="query and documents required")
+    if len(req.documents) > MAX_RERANK_DOCS:
+        raise HTTPException(status_code=400, detail="too many documents")
+    pairs = [[req.query, doc] for doc in req.documents]
+    inputs = app.state.rerank_tok(
+        pairs, padding=True, truncation=True, max_length=512, return_tensors="pt"
+    )
+    with torch.no_grad():
+        scores = app.state.rerank_model(**inputs).logits.view(-1).float().tolist()
+    return {"scores": scores}
