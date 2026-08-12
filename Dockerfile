@@ -16,19 +16,17 @@ RUN uv sync --frozen --no-dev
 # needs internet once; for fully offline environments, build here and transfer
 # the image with `docker save` / `docker load`.
 #
-# The names come from app.main rather than being repeated here. They used to be
-# written out twice, and when the reranker was added to the app nobody added it
-# here - so the image shipped with only SigLIP cached while startup asked for a
-# second model, and HF_HUB_OFFLINE below turned that into a crash loop. Importing
-# the constants makes it impossible for the two lists to drift apart again.
-RUN uv run python -c "\
-from transformers import (AutoModelForSequenceClassification, AutoTokenizer, \
-                          SiglipImageProcessor, SiglipModel); \
-from app.main import MODEL_NAME, RERANK_MODEL; \
-SiglipModel.from_pretrained(MODEL_NAME, use_safetensors=True); \
-SiglipImageProcessor.from_pretrained(MODEL_NAME); \
-AutoTokenizer.from_pretrained(RERANK_MODEL); \
-AutoModelForSequenceClassification.from_pretrained(RERANK_MODEL)"
+# Bake by calling the SAME function startup calls, not by listing the models
+# again here. The list has now drifted twice: first the reranker was missing,
+# then SigLIP's text tokenizer, and both times the image shipped fine and the
+# container died on the server instead - HF_HUB_OFFLINE below turns a file
+# missing from the cache into "expected str, bytes or os.PathLike object, not
+# NoneType", which names neither the model nor the file.
+#
+# The previous attempt imported the model names from app.main and claimed that
+# settled it. It did not: the names never drifted, the per-model component list
+# did. One shared function is the only version of this that cannot drift.
+RUN uv run python -c "from app.main import load_models; load_models()"
 
 # H11: guarantee no runtime Hub connectivity — serve the baked model from cache only.
 # (Also keeps startup fast: no Hub connectivity check to time out on.)
