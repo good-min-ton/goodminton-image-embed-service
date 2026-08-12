@@ -7,6 +7,7 @@ def test_health_returns_status_and_model_loaded(client):
     assert resp.json() == {
         "status": "ok",
         "model_loaded": True,
+        "text_tokenizer_loaded": True,
         "rerank_loaded": True,
         "device": main_module.DEVICE,
     }

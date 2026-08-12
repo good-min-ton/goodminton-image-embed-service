@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.model.eval()
     app.state.processor = SiglipImageProcessor.from_pretrained(MODEL_NAME)
+    app.state.text_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 
     app.state.rerank_tok = AutoTokenizer.from_pretrained(RERANK_MODEL)
     app.state.rerank_model = (
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
 
     app.state.model = None
     app.state.processor = None
+    app.state.text_tokenizer = None
     app.state.rerank_tok = None
     app.state.rerank_model = None
 
@@ -64,11 +66,16 @@ app = FastAPI(
 )
 
 
+class EmbedTextRequest(BaseModel):
+    text: str
+
+
 @app.get("/health")
 async def health():
     return {
         "status": "ok",
         "model_loaded": app.state.model is not None,
+        "text_tokenizer_loaded": app.state.text_tokenizer is not None,
         "rerank_loaded": app.state.rerank_model is not None,
         "device": DEVICE,
     }
@@ -102,6 +109,24 @@ async def embed_image(file: UploadFile = File(...)):  # noqa: B008
     inputs = app.state.processor(images=img, return_tensors="pt").to(DEVICE)
     with torch.no_grad():
         features = app.state.model.get_image_features(**inputs)
+    normalized = features / features.norm(p=2, dim=-1, keepdim=True)
+    return {"embedding": normalized.squeeze(0).float().cpu().tolist()}
+
+
+@app.post("/embed/text")
+async def embed_text(req: EmbedTextRequest):
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="text must not be empty")
+    # SigLIP text tower -> SAME joint space as get_image_features. Tokenize with
+    # padding="max_length", truncation=True: SigLIP's model_max_length is 64
+    # (max_position_embeddings), so long inputs MUST be truncated to 64 or
+    # get_text_features raises ValueError. Inputs are moved .to(DEVICE) to match
+    # the model (GPU auto-device), exactly like /embed/image.
+    inputs = app.state.text_tokenizer(
+        text=[req.text], padding="max_length", truncation=True, return_tensors="pt"
+    ).to(DEVICE)
+    with torch.no_grad():
+        features = app.state.model.get_text_features(**inputs)
     normalized = features / features.norm(p=2, dim=-1, keepdim=True)
     return {"embedding": normalized.squeeze(0).float().cpu().tolist()}
 
