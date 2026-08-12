@@ -26,6 +26,38 @@ Image.MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP decompression-bomb guard (H4)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB raw-byte cap (H4)
 
 
+def load_models(device: str = "cpu", rerank_dtype=None) -> dict[str, object]:
+    """Nạp mọi thứ service cần từ Hugging Face, trả về theo tên thuộc tính.
+
+    Đây là NƠI DUY NHẤT gọi from_pretrained, và Dockerfile bake cache bằng cách
+    gọi chính hàm này. Trước đây Dockerfile liệt kê lại danh sách model bằng
+    tay; nó đã lệch hai lần. Lần đầu là thiếu reranker, lần hai là thiếu
+    tokenizer văn bản của SigLIP - cả hai lần chỉ lộ ra lúc container khởi động
+    trên máy chủ, vì HF_HUB_OFFLINE=1 biến một file thiếu trong cache thành lỗi
+    khó đọc ("expected str, bytes or os.PathLike object, not NoneType").
+
+    Lần sửa trước tôi cho Dockerfile import tên model từ đây và tưởng thế là
+    hết lệch. Không phải: tên model không lệch, nhưng DANH SÁCH THÀNH PHẦN của
+    mỗi model thì có. Chỉ khi hai bên chạy đúng một hàm mới hết đường lệch.
+
+    Kèm một cái lợi: build sẽ hỏng ngay nếu một model không nạp được, thay vì
+    để container quay vòng khởi động trên production.
+    """
+    return {
+        "model": SiglipModel.from_pretrained(MODEL_NAME, use_safetensors=True)
+        .to(device)
+        .eval(),
+        "processor": SiglipImageProcessor.from_pretrained(MODEL_NAME),
+        "text_tokenizer": AutoTokenizer.from_pretrained(MODEL_NAME),
+        "rerank_tok": AutoTokenizer.from_pretrained(RERANK_MODEL),
+        "rerank_model": AutoModelForSequenceClassification.from_pretrained(
+            RERANK_MODEL, torch_dtype=rerank_dtype
+        )
+        .to(device)
+        .eval(),
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # H12: TORCH_NUM_THREADS should match the container's cpu allocation;
@@ -33,29 +65,14 @@ async def lifespan(app: FastAPI):
     threads = int(os.environ.get("TORCH_NUM_THREADS", os.cpu_count() or 1))
     torch.set_num_threads(threads)
 
-    app.state.model = SiglipModel.from_pretrained(MODEL_NAME, use_safetensors=True).to(
-        DEVICE
-    )
-    app.state.model.eval()
-    app.state.processor = SiglipImageProcessor.from_pretrained(MODEL_NAME)
-    app.state.text_tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-
-    app.state.rerank_tok = AutoTokenizer.from_pretrained(RERANK_MODEL)
-    app.state.rerank_model = (
-        AutoModelForSequenceClassification.from_pretrained(
-            RERANK_MODEL, torch_dtype=_RERANK_DTYPE
-        )
-        .to(DEVICE)
-        .eval()
-    )
+    da_nap = load_models(DEVICE, _RERANK_DTYPE)
+    for ten, doi_tuong in da_nap.items():
+        setattr(app.state, ten, doi_tuong)
 
     yield
 
-    app.state.model = None
-    app.state.processor = None
-    app.state.text_tokenizer = None
-    app.state.rerank_tok = None
-    app.state.rerank_model = None
+    for ten in da_nap:
+        setattr(app.state, ten, None)
 
 
 app = FastAPI(
